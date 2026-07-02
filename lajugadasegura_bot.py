@@ -12,7 +12,7 @@ import requests
 from telegram import Bot
 from telegram.error import TelegramError
 import asyncio
-from instagrapi import Client as InstaClient
+# from instagrapi import Client as InstaClient  # Desactivado por compatibilidad
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -178,7 +178,7 @@ Periodo: {week_data['period']}
 async def main():
     # Inicializa publicadores
     telegram_pub = TelegramPublisher(TELEGRAM_TOKEN)
-    instagram_pub = InstaClient() if INSTAGRAM_USERNAME else None
+    instagram_pub = None  # Desactivado por compatibilidad
     airtable_mgr = AirtableManager(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
     scheduler = PostScheduler(telegram_pub, instagram_pub, airtable_mgr)
     
