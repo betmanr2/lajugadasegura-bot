@@ -18,13 +18,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ==================== CONFIGURACIÓN ====================
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")  # Tu token del bot
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHANNEL = "@lajugadasegura00"
-INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME")
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "lajugadasegura00")
 INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
-AIRTABLE_TABLE_NAME = "Posts"
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID", "app7nhlRPoUAeg123")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME", "tblImINZSxS8oWGwG")
 ADMIN_EMAIL = "betmanr2@proton.me"
 
 # ==================== TELEGRAM ====================
@@ -79,16 +79,22 @@ class AirtableManager:
         headers = {"Authorization": f"Bearer {self.api_key}"}
         today = datetime.now().strftime("%Y-%m-%d")
         
-        params = {
-            "filterByFormula": f"{{Fecha}} = '{today}'",
-            "sort": [{"field": "Hora", "direction": "asc"}]
-        }
+        params = [
+            ("filterByFormula", f"{{Fecha}} = '{today}'"),
+            ("sort[0][field]", "Hora"),
+            ("sort[0][direction]", "asc"),
+        ]
         
         try:
             response = requests.get(url, headers=headers, params=params)
             response.raise_for_status()
             records = response.json().get("records", [])
-            return [record["fields"] for record in records]
+            posts = []
+            for record in records:
+                fields = record["fields"]
+                fields["_record_id"] = record["id"]
+                posts.append(fields)
+            return posts
         except requests.exceptions.RequestException as e:
             print(f"Error obtener posts de Airtable: {e}")
             return []
@@ -117,10 +123,27 @@ class PostScheduler:
     async def check_and_publish(self):
         """Verifica si hay posts para publicar en este momento"""
         posts = self.airtable.get_today_posts()
-        current_time = datetime.now().strftime("%H:%M")
-        
-        for post in posts:
-            if post.get("Hora") == current_time and post.get("Estado") == "Pendiente":
+        now = datetime.now()
+        current_time = now.strftime("%H:%M")
+
+        pendientes = [p for p in posts if p.get("Estado") == "Pendiente"]
+        print(f"[{now.strftime('%H:%M:%S')}] Posts de hoy: {len(posts)} | Pendientes: {len(pendientes)} | Hora actual: {current_time}")
+        if pendientes:
+            print("  Horas pendientes:", [p.get("Hora") for p in pendientes])
+
+        for post in pendientes:
+            hora_post = post.get("Hora", "")
+            try:
+                hora_post_dt = datetime.strptime(hora_post, "%H:%M")
+                hora_post_dt = now.replace(hour=hora_post_dt.hour, minute=hora_post_dt.minute, second=0, microsecond=0)
+            except ValueError:
+                print(f"  [!] Hora inválida en post: '{hora_post}' — se omite")
+                continue
+
+            diferencia = (now - hora_post_dt).total_seconds()
+            # Publica si la hora programada ya pasó (hasta 5 min de margen) y no se ha publicado
+            if 0 <= diferencia <= 300:
+                print(f"  -> Publicando post de las {hora_post} (retraso: {int(diferencia)}s)")
                 await self.publish_post(post)
     
     async def publish_post(self, post):
@@ -136,13 +159,25 @@ class PostScheduler:
             if platform == "telegram":
                 result = await self.telegram.publish(text, hashtags)
             elif platform == "instagram":
-                result = self.instagram.publish(text, hashtags)
+                if self.instagram is None:
+                    result = {"status": "skipped", "platform": "instagram", "note": "Instagram desactivado"}
+                else:
+                    result = self.instagram.publish(text, hashtags)
             else:
                 continue
             
             results.append(result)
             print(f"[{datetime.now()}] Publicado en {platform}: {result}")
-        
+
+        record_id = post.get("_record_id")
+        if record_id:
+            fallos = [r for r in results if r.get("status") == "error"]
+            nuevo_estado = "Error" if fallos else "Publicado"
+            self.airtable.update_post_status(record_id, nuevo_estado)
+            print(f"  Estado actualizado en Airtable: {nuevo_estado}")
+        else:
+            print("  [!] No se encontró _record_id, no se pudo actualizar el estado en Airtable")
+
         return results
 
 # ==================== REPORTE ====================
@@ -176,16 +211,32 @@ Periodo: {week_data['period']}
 
 # ==================== MAIN ====================
 async def main():
+    import sys
+    modo_test = "--test" in sys.argv
+
     # Inicializa publicadores
     telegram_pub = TelegramPublisher(TELEGRAM_TOKEN)
     instagram_pub = None  # Desactivado por compatibilidad
     airtable_mgr = AirtableManager(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, AIRTABLE_TABLE_NAME)
     scheduler = PostScheduler(telegram_pub, instagram_pub, airtable_mgr)
-    
+
     print("[✓] Bot LaJugadaSegura iniciado")
     print(f"[✓] Canal Telegram: {TELEGRAM_CHANNEL}")
+
+    if modo_test:
+        print("[TEST] Modo prueba: publicando el primer post Pendiente de hoy, sin comprobar la hora")
+        posts = airtable_mgr.get_today_posts()
+        pendientes = [p for p in posts if p.get("Estado") == "Pendiente"]
+        if not pendientes:
+            print("[TEST] No hay posts con Estado='Pendiente' para hoy. Añade uno en Airtable con Fecha de hoy y prueba de nuevo.")
+            return
+        print(f"[TEST] Publicando: {pendientes[0].get('Texto del Post', '')[:60]}...")
+        resultado = await scheduler.publish_post(pendientes[0])
+        print(f"[TEST] Resultado: {resultado}")
+        return
+
     print(f"[✓] Monitoreando Airtable cada minuto...")
-    
+
     # Loop infinito - Revisa cada minuto si hay posts para publicar
     while True:
         try:
